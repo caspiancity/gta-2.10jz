@@ -17,101 +17,109 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Fix Case-Sensitivity and Prevent Duplicate Compilation
+      - name: Auto-Correct Include Case Mismatches in Source Code
         shell: python
         run: |
           import os
           import re
-          from pathlib import Path
 
-          def resolve_case_mismatches_safely(base_dir):
-              # include "header.h" sətirlərini tapmaq üçün
-              inc_pattern = re.compile(r'#\s*include\s*"([^"]+)"')
-              
-              # Layihədəki bütün real faylların xəritəsi: { 'fayl_adi.h': '/tam/yol/fayl_adi.h' }
-              # Qovluqları deyil, yalnız real faylları qeyd edirik ki, dublikat qovluq yaranmasın!
-              file_map = {}
+          def rewrite_includes_with_correct_casing(base_dir):
+              # Skan edilməyəcək qovluqlar
               skip_dirs = {'.git', '.github', '.gradle', 'build', 'app/build'}
               
+              # 1. Repodakı bütün real faylları mütləq yolları ilə (kiçik hərflərlə açar olaraq) indeksləyirik
+              abs_file_map = {}
               print("1. Diskdeki real fayllar skan edilir...")
               for root, dirs, files in os.walk(base_dir):
                   if any(skip in root for skip in skip_dirs):
                       continue
                   for f in files:
                       if f.endswith(('.h', '.hpp', '.c', '.cpp', '.cc')):
-                          file_path = os.path.abspath(os.path.join(root, f))
-                          # Əgər bu bir symlink-dirsə, indeksləmə və sil (köhnə buildlərdən qalan xətalı keçidlər)
-                          if os.path.islink(file_path):
+                          abs_path = os.path.abspath(os.path.join(root, f))
+                          # Əgər əvvəlki səhv addımlardan qalan symlink varsa, onu silirik
+                          if os.path.islink(abs_path):
                               try:
-                                  os.unlink(file_path)
+                                  os.unlink(abs_path)
                               except:
                                   pass
                               continue
-                          
-                          # Kiçik hərflərlə fayl adı -> real yol
-                          file_map[f.lower()] = file_path
+                          abs_file_map[abs_path.lower()] = abs_path
 
-              # Həmçinin köhnə xətalı symlink qovluqlarını silirik
-              print("2. Kohne xetali qovluq simlinkleri temizlenir...")
-              for root, dirs, files in os.walk(base_dir):
-                  if any(skip in root for skip in skip_dirs):
-                      continue
-                  for d in dirs:
-                      dir_path = os.path.join(root, d)
-                      if os.path.islink(dir_path):
-                          try:
-                              os.unlink(dir_path)
-                              print(f"[TEMIZLENDI] Simlink qovlugu silindi: {dir_path}")
-                          except:
-                              pass
-
-              print("3. Boyuk-kicik herf ferqleri yalniz fayl seviyyesinde hell edilir...")
-              # İndi bütün kodları analiz edirik
+              # İki dırnaq arasındakı include-ları hədəf alan regex: #include "path/to/header.h"
+              inc_pattern = re.compile(r'(#\s*include\s*")([^"]+)(")')
+              
+              print("2. Kod daxilindeki include sətirləri analiz və bərpa edilir...")
               for root, dirs, files in os.walk(base_dir):
                   if any(skip in root for skip in skip_dirs):
                       continue
                   for file in files:
                       if file.endswith(('.cpp', '.h', '.hpp', '.c', '.cc')):
-                          file_path = os.path.join(root, file)
+                          file_path = os.path.abspath(os.path.join(root, file))
                           try:
                               with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                                   content = f.read()
                           except:
                               continue
                           
-                          includes = inc_pattern.findall(content)
-                          current_dir_abs = os.path.abspath(root)
+                          modified = False
                           
-                          for inc in includes:
-                              inc_clean = inc.strip()
-                              if not inc_clean:
-                                  continue
+                          def replacer(match):
+                              nonlocal modified
+                              prefix = match.group(1)      # #include "
+                              inc_path_str = match.group(2)  # məsələn, ../vendor/RakNet/BitStream.h
+                              suffix = match.group(3)      # "
                               
-                              # Include edilən faylın təmiz adı (məs. "BitStream.h" və ya "playerTabList.h")
-                              inc_basename = os.path.basename(inc_clean)
-                              low_inc_basename = inc_basename.lower()
+                              # Cari faylın yerləşdiyi qovluq
+                              current_file_dir = os.path.dirname(file_path)
                               
-                              # Əgər bu adda real fayl repomuzda mövcuddursa
-                              if low_inc_basename in file_map:
-                                  real_file_path = file_map[low_inc_basename]
-                                  real_basename = os.path.basename(real_file_path)
+                              # 1. İlk olaraq include yolunu cari qovluğa nəzərən yoxlayırıq
+                              target_abs_path = os.path.abspath(os.path.join(current_file_dir, inc_path_str))
+                              target_key = target_abs_path.lower()
+                              
+                              if target_key in abs_file_map:
+                                  real_target_abs = abs_file_map[target_key]
+                                  # Real faylın cari fayla nəzərən nisbi yolunu hesablayırıq
+                                  real_rel_path = os.path.relpath(real_target_abs, current_file_dir)
+                                  # C++ standartına uyğun olaraq slash-ləri tənzimləyirik
+                                  real_rel_path = real_rel_path.replace('\\', '/')
                                   
-                                  # Əgər adlar fərqlidirsə (məs. playertablist.h vs playerTabList.h)
-                                  if real_basename != inc_basename:
-                                      # Simlinki cari faylın axtarış edə biləcəyi qovluqda yaradırıq
-                                      target_link = os.path.join(current_dir_abs, inc_basename)
-                                      
-                                      # Əgər artıq belə bir fayl/link yoxdursa, simlink yaradaq
-                                      if not os.path.exists(target_link):
-                                          try:
-                                              # Nisbi yol tapırıq ki, symlink düzgün işləsin
-                                              rel_target = os.path.relpath(real_file_path, current_dir_abs)
-                                              os.symlink(rel_target, target_link)
-                                              print(f"[DUZELDIS] Simlink yaradildi: {target_link} -> {rel_target}")
-                                          except Exception as e:
-                                              pass
+                                  if real_rel_path != inc_path_str:
+                                      print(f"[REWRITE] {os.path.basename(file_path)}: \"{inc_path_str}\" -> \"{real_rel_path}\"")
+                                      modified = True
+                                      return f"{prefix}{real_rel_path}{suffix}"
+                                  return match.group(0)
+                              
+                              # 2. Əgər nisbi olaraq tapılmasa, layihənin əsas daxiletmə (include) qovluqlarına nəzərən yoxlayırıq
+                              include_bases = [
+                                  os.path.abspath('app/src/main/cpp'),
+                                  os.path.abspath('app/src/main/cpp/samp'),
+                                  os.path.abspath('app/src/main/cpp/samp/vendor')
+                              ]
+                              for base in include_bases:
+                                  if os.path.exists(base):
+                                      target_abs_path = os.path.abspath(os.path.join(base, inc_path_str))
+                                      target_key = target_abs_path.lower()
+                                      if target_key in abs_file_map:
+                                          real_target_abs = abs_file_map[target_key]
+                                          real_rel_path = os.path.relpath(real_target_abs, base)
+                                          real_rel_path = real_rel_path.replace('\\', '/')
+                                          if real_rel_path != inc_path_str:
+                                              print(f"[REWRITE-BASE] {os.path.basename(file_path)}: \"{inc_path_str}\" -> \"{real_rel_path}\"")
+                                              modified = True
+                                              return f"{prefix}{real_rel_path}{suffix}"
+                                          break
+                              
+                              return match.group(0)
+                          
+                          new_content = inc_pattern.sub(replacer, content)
+                          if modified:
+                              try:
+                                  with open(file_path, 'w', encoding='utf-8') as f:
+                                      f.write(new_content)
+                              except Exception as e:
+                                  print(f"Yazilma xetasi {file_path}: {e}")
 
-          resolve_case_mismatches_safely('.')
+          rewrite_includes_with_correct_casing('.')
 
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
