@@ -17,6 +17,71 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
+      - name: Fix Case-Sensitivity Mismatches
+        shell: python
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          def fix_case_insensitive_includes(base_dir):
+              # Kod daxilindəki include sətirlərini tapmaq üçün regex
+              inc_pattern = re.compile(r'#\s*include\s*["<]([^">]+)[">]')
+              
+              # Diskdəki mövcud faylların kiçik hərflə xəritəsini çıxarırıq
+              file_map = {}
+              for root, dirs, files in os.walk(base_dir):
+                  for f in files:
+                      fp = os.path.join(root, f)
+                      file_map[fp.lower()] = fp
+
+              # Bütün mənbə fayllarını yoxlayırıq
+              for root, dirs, files in os.walk(base_dir):
+                  for file in files:
+                      if file.endswith(('.cpp', '.h', '.hpp', '.c', '.cc')):
+                          file_path = os.path.join(root, file)
+                          try:
+                              with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                  content = f.read()
+                          except:
+                              continue
+                          
+                          includes = inc_pattern.findall(content)
+                          current_dir = Path(root)
+                          
+                          for inc in includes:
+                              inc_clean = inc.strip()
+                              inc_path = Path(inc_clean)
+                              
+                              # Kodun axtardığı xəyali yol
+                              requested_target = current_dir / inc_path
+                              
+                              # Həmin yolu kiçik hərflərlə real fayllar arasında axtarırıq
+                              real_path = file_map.get(str(requested_target).lower())
+                              
+                              # Əgər birbaşa tapılmasa, qlobal olaraq sonluğuna görə axtarırıq
+                              if not real_path:
+                                  suffix = str(inc_path).lower()
+                                  for low_path, actual_path in file_map.items():
+                                      if low_path.endswith(suffix):
+                                          real_path = actual_path
+                                          break
+                              
+                              # Əgər fayl varsa amma adı fərqlidirsə (məs. playerTabList.h vs playertablist.h)
+                              if real_path and not os.path.exists(str(requested_target)):
+                                  os.makedirs(os.path.dirname(str(requested_target)), exist_ok=True)
+                                  try:
+                                      rel_target = os.path.relpath(real_path, os.path.dirname(str(requested_target)))
+                                      os.symlink(rel_target, str(requested_target))
+                                      print(f"Symlink yaradildi: {requested_target} -> {rel_target}")
+                                  except FileExistsError:
+                                      pass
+                                  except Exception as e:
+                                      print(f"Xeta bas verdi: {e}")
+
+          # C++ kodlarının olduğu əsas qovluğu skan edirik
+          fix_case_insensitive_includes('app/src/main/cpp')
+
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
 
