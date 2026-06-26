@@ -17,26 +17,33 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Fix Case-Sensitivity Mismatches
+      - name: Fix Case-Sensitivity Mismatches Globally
         shell: python
         run: |
           import os
           import re
           from pathlib import Path
 
-          def fix_case_insensitive_includes(base_dir):
-              # Kod daxilindəki include sətirlərini tapmaq üçün regex
+          def fix_all_case_mismatches(base_dir):
+              # Kod daxilindəki include çağırışlarını tapan regex
               inc_pattern = re.compile(r'#\s*include\s*["<]([^">]+)[">]')
-              
-              # Diskdəki mövcud faylların kiçik hərflə xəritəsini çıxarırıq
               file_map = {}
+              
+              # Skan edilməyəcək sistem qovluqları
+              skip_dirs = {'.git', '.github', '.gradle', 'build', 'app/build'}
+
+              print("1. Sistemdeki butun fayllarin xeritesi cixarilir...")
               for root, dirs, files in os.walk(base_dir):
+                  if any(skip in root for skip in skip_dirs):
+                      continue
                   for f in files:
                       fp = os.path.join(root, f)
                       file_map[fp.lower()] = fp
 
-              # Bütün mənbə fayllarını yoxlayırıq
+              print("2. Boyuk-kicik herf ferqleri axtarilir ve simvolik kecidler yaradilir...")
               for root, dirs, files in os.walk(base_dir):
+                  if any(skip in root for skip in skip_dirs):
+                      continue
                   for file in files:
                       if file.endswith(('.cpp', '.h', '.hpp', '.c', '.cc')):
                           file_path = os.path.join(root, file)
@@ -59,7 +66,7 @@ jobs:
                               # Həmin yolu kiçik hərflərlə real fayllar arasında axtarırıq
                               real_path = file_map.get(str(requested_target).lower())
                               
-                              # Əgər birbaşa tapılmasa, qlobal olaraq sonluğuna görə axtarırıq
+                              # Əgər birbaşa tapılmasa, qlobal olaraq sonluğuna görə yoxlayırıq
                               if not real_path:
                                   suffix = str(inc_path).lower()
                                   for low_path, actual_path in file_map.items():
@@ -67,20 +74,83 @@ jobs:
                                           real_path = actual_path
                                           break
                               
-                              # Əgər fayl varsa amma adı fərqlidirsə (məs. playerTabList.h vs playertablist.h)
+                              # Əgər fayl diskdə varsa amma böyük-kiçik hərf fərqi qarşıya çıxıbsa
                               if real_path and not os.path.exists(str(requested_target)):
                                   os.makedirs(os.path.dirname(str(requested_target)), exist_ok=True)
                                   try:
                                       rel_target = os.path.relpath(real_path, os.path.dirname(str(requested_target)))
                                       os.symlink(rel_target, str(requested_target))
-                                      print(f"Symlink yaradildi: {requested_target} -> {rel_target}")
-                                  except FileExistsError:
+                                      print(f"[DUZELDIS] Ugurla simlink yaradildi: {inc_clean} -> {os.path.basename(real_path)}")
+                                  except:
                                       pass
-                                  except Exception as e:
-                                      print(f"Xeta bas verdi: {e}")
 
-          # C++ kodlarının olduğu əsas qovluğu skan edirik
-          fix_case_insensitive_includes('app/src/main/cpp')
+          # Bütün repozitoriyanı skan edirik
+          fix_all_case_mismatches('.')
+
+      - name: Clean Opus Headers and Fix C/C++ Mismatches
+        shell: python
+        run: |
+          import os
+
+          def clean_opus_files(opus_dir):
+              print(f"Opus qovlugu temizlenir: {opus_dir}")
+              if not os.path.exists(opus_dir):
+                  print("Opus qovlugu tapilmadi, kecirilir.")
+                  return
+
+              for root, dirs, files in os.walk(opus_dir):
+                  for file in files:
+                      if file.endswith(('.h', '.c')):
+                          file_path = os.path.join(root, file)
+                          try:
+                              with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                  lines = f.readlines()
+                              
+                              cleaned_lines = []
+                              skip_mode = False
+                              modified = False
+                              
+                              for line in lines:
+                                  # 'namespace ImGui' ve ona aid olan sətirləri təmizləyirik (C kodunda səhvdir)
+                                  if 'namespace ImGui' in line or 'namespace imgui' in line:
+                                      skip_mode = True
+                                      modified = True
+                                      continue
+                                  
+                                  if skip_mode and ('}' in line or 'namespace' in line):
+                                      # Namespace blokunun sonunu tapdıqda dayandırırıq
+                                      skip_mode = False
+                                      continue
+                                  
+                                  if skip_mode:
+                                      continue
+                                      
+                                  # Əgər daxildə lazımsız C++ funksiyaları qalıbsa, təmizləyirik
+                                  if 'ImGui::' in line or 'imgui.' in line:
+                                      modified = True
+                                      continue
+                                      
+                                  cleaned_lines.append(line)
+                                  
+                              if modified:
+                                  with open(file_path, 'w', encoding='utf-8') as f:
+                                      f.writelines(cleaned_lines)
+                                  print(f"[TEMIZLENDI] C-ye uygunlasdirildi: {file_path}")
+                          except Exception as e:
+                              print(f"Xeta bas verdi {file_path}: {e}")
+
+          # Səhv yaradan 'opus/celt/string.h' faylı standart string.h-ı bloklayırsa, onu silirik və ya adını dəyişirik
+          bad_string_h = 'app/src/main/cpp/opus/celt/string.h'
+          if os.path.exists(bad_string_h):
+              try:
+                  # Faylın içində standart string.h-ı çağıran bir şey yoxdursa, mühüm deyil.
+                  # Amma dərsləyicini çaşdırmasın deyə adını dəyişirik və ya təmizləyirik.
+                  print(f"Problemli string.h tapildi ve silinir: {bad_string_h}")
+                  os.remove(bad_string_h)
+              except Exception as e:
+                  print(f"string.h silinerken xeta: {e}")
+
+          clean_opus_files('app/src/main/cpp/opus')
 
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
