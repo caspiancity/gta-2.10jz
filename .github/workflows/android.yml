@@ -17,86 +17,56 @@ jobs:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Fix Case-Sensitivity Mismatches Globally
+      - name: Fix Case-Sensitivity and Prevent Duplicate Compilation
         shell: python
         run: |
           import os
           import re
           from pathlib import Path
 
-          def fix_case_mismatches_globally(base_dir):
-              # Dirnaq icindeki include-lari axtaririq ("path/to/header.h")
+          def resolve_case_mismatches_safely(base_dir):
+              # include "header.h" sətirlərini tapmaq üçün
               inc_pattern = re.compile(r'#\s*include\s*"([^"]+)"')
               
-              # Layihe daxilindeki butun qovluq ve fayllari kicik herflerle indeksleyirik
-              # 'kicik_yol': 'Esl_Boyuk_Kicik_Yol'
-              full_fs_map = {}
+              # Layihədəki bütün real faylların xəritəsi: { 'fayl_adi.h': '/tam/yol/fayl_adi.h' }
+              # Qovluqları deyil, yalnız real faylları qeyd edirik ki, dublikat qovluq yaranmasın!
+              file_map = {}
               skip_dirs = {'.git', '.github', '.gradle', 'build', 'app/build'}
               
-              print("1. Diskdeki butun qovluq ve fayllar skan edilir...")
+              print("1. Diskdeki real fayllar skan edilir...")
               for root, dirs, files in os.walk(base_dir):
                   if any(skip in root for skip in skip_dirs):
                       continue
-                  # Qovluqlari indeksle
-                  for d in dirs:
-                      full_path = os.path.abspath(os.path.join(root, d))
-                      full_fs_map[full_path.lower()] = full_path
-                  # Fayllari indeksle
                   for f in files:
-                      full_path = os.path.abspath(os.path.join(root, f))
-                      full_fs_map[full_path.lower()] = full_path
-
-              def ensure_path_casing_resolved(requested_abs_path):
-                  """
-                  Komponent-komponent gederek, yolda boyuk-kicik herf xetasi varsa
-                  simlinkler vasitesile hemin qovluq ve ya fayli berpa edir.
-                  """
-                  requested_abs_path = os.path.normpath(requested_abs_path)
-                  if os.path.exists(requested_abs_path):
-                      return
-                  
-                  # Kicik herfli versiyasi diskde varmi?
-                  if requested_abs_path.lower() not in full_fs_map:
-                      return
-                  
-                  # Diskdeki esl fiziki yol
-                  real_abs_path = full_fs_map[requested_abs_path.lower()]
-                  
-                  # Komponentleri ayiririq
-                  req_parts = requested_abs_path.split(os.sep)
-                  real_parts = real_abs_path.split(os.sep)
-                  
-                  # Kokden baslayaraq yoxlayiriq
-                  current_built_path = req_parts[0] if req_parts[0] else os.sep
-                  
-                  for i in range(1, len(req_parts)):
-                      req_component = req_parts[i]
-                      real_component = real_parts[i]
-                      
-                      next_req_path = os.path.join(current_built_path, req_component)
-                      next_real_path = os.path.join(current_built_path, real_component)
-                      
-                      # Eger esl qovluq/fayl ferqli adlanirsa ve xeyali qovluq yoxdursa
-                      if req_component != real_component and not os.path.exists(next_req_path):
-                          # Simlinki yaradacagimiz yer
-                          link_parent = current_built_path
-                          if os.path.exists(link_parent):
+                      if f.endswith(('.h', '.hpp', '.c', '.cpp', '.cc')):
+                          file_path = os.path.abspath(os.path.join(root, f))
+                          # Əgər bu bir symlink-dirsə, indeksləmə və sil (köhnə buildlərdən qalan xətalı keçidlər)
+                          if os.path.islink(file_path):
                               try:
-                                  # Simlink yaradiriq (Nisbi hədəflə)
-                                  os.symlink(real_component, next_req_path)
-                                  print(f"[REKURSIV SYMLINK] {next_req_path} -> {real_component}")
-                                  full_fs_map[next_req_path.lower()] = next_req_path
-                              except Exception as e:
+                                  os.unlink(file_path)
+                              except:
                                   pass
-                      
-                      current_built_path = next_req_path
+                              continue
+                          
+                          # Kiçik hərflərlə fayl adı -> real yol
+                          file_map[f.lower()] = file_path
 
-              print("2. Boyuk-kicik herf ve qovluq ferqleri analiz edilir...")
-              # Include qovluqlari (compiler axtaris yollari)
-              cpp_base = os.path.abspath('app/src/main/cpp')
-              samp_base = os.path.abspath('app/src/main/cpp/samp')
-              vendor_base = os.path.abspath('app/src/main/cpp/samp/vendor')
-              
+              # Həmçinin köhnə xətalı symlink qovluqlarını silirik
+              print("2. Kohne xetali qovluq simlinkleri temizlenir...")
+              for root, dirs, files in os.walk(base_dir):
+                  if any(skip in root for skip in skip_dirs):
+                      continue
+                  for d in dirs:
+                      dir_path = os.path.join(root, d)
+                      if os.path.islink(dir_path):
+                          try:
+                              os.unlink(dir_path)
+                              print(f"[TEMIZLENDI] Simlink qovlugu silindi: {dir_path}")
+                          except:
+                              pass
+
+              print("3. Boyuk-kicik herf ferqleri yalniz fayl seviyyesinde hell edilir...")
+              # İndi bütün kodları analiz edirik
               for root, dirs, files in os.walk(base_dir):
                   if any(skip in root for skip in skip_dirs):
                       continue
@@ -117,19 +87,31 @@ jobs:
                               if not inc_clean:
                                   continue
                               
-                              # 1. Cari faylin qovluguna nezeren yoxla (../vendor/RakNet/BitStream.h)
-                              cand_relative = os.path.join(current_dir_abs, inc_clean)
-                              ensure_path_casing_resolved(cand_relative)
+                              # Include edilən faylın təmiz adı (məs. "BitStream.h" və ya "playerTabList.h")
+                              inc_basename = os.path.basename(inc_clean)
+                              low_inc_basename = inc_basename.lower()
                               
-                              # 2. Standart include qovluqlarina nezeren yoxla
-                              if os.path.exists(cpp_base):
-                                  ensure_path_casing_resolved(os.path.join(cpp_base, inc_clean))
-                              if os.path.exists(samp_base):
-                                  ensure_path_casing_resolved(os.path.join(samp_base, inc_clean))
-                              if os.path.exists(vendor_base):
-                                  ensure_path_casing_resolved(os.path.join(vendor_base, inc_clean))
+                              # Əgər bu adda real fayl repomuzda mövcuddursa
+                              if low_inc_basename in file_map:
+                                  real_file_path = file_map[low_inc_basename]
+                                  real_basename = os.path.basename(real_file_path)
+                                  
+                                  # Əgər adlar fərqlidirsə (məs. playertablist.h vs playerTabList.h)
+                                  if real_basename != inc_basename:
+                                      # Simlinki cari faylın axtarış edə biləcəyi qovluqda yaradırıq
+                                      target_link = os.path.join(current_dir_abs, inc_basename)
+                                      
+                                      # Əgər artıq belə bir fayl/link yoxdursa, simlink yaradaq
+                                      if not os.path.exists(target_link):
+                                          try:
+                                              # Nisbi yol tapırıq ki, symlink düzgün işləsin
+                                              rel_target = os.path.relpath(real_file_path, current_dir_abs)
+                                              os.symlink(rel_target, target_link)
+                                              print(f"[DUZELDIS] Simlink yaradildi: {target_link} -> {rel_target}")
+                                          except Exception as e:
+                                              pass
 
-          fix_case_mismatches_globally('.')
+          resolve_case_mismatches_safely('.')
 
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
